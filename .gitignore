@@ -6,3 +6,11 @@ xcuserdata/
 .omo/
 *.ipa
 *.dSYM.zip
+signing.env
+mac/probe/probe.log
+mac/probe/probe.err
+HotspotProxy.xcodeproj/
+Config/*.entitlements
+Sources/Info.plist
+Widget/Info.plist
+docs/private/

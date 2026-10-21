@@ -154,8 +154,10 @@ final class Session {
                 let port = (UInt16(r[4 + addrLen]) << 8) | UInt16(r[5 + addrLen])
                 if cmd == 3 { udpAssociate(); return }
                 connect(host: host, port: port) { [self] ok in
-                    reply(ok ? 0 : 5)
-                    if ok { pipe() } else { close() }
+                    if ok { reply(0); pipe() }
+                    else {  // flush the failure reply before closing, otherwise the client just sees EOF
+                        client.send(content: Data([5, 5, 0, 1, 0, 0, 0, 0, 0, 0]), completion: .contentProcessed { [weak self] _ in self?.close() })
+                    }
                 }
             }
         }
@@ -255,13 +257,20 @@ final class Session {
         up.stateUpdateHandler = { [weak self] s in
             switch s {
             case .ready: if !fired { fired = true; done(true) }
-            case .failed, .waiting:
+            case .failed:
                 if !fired { fired = true; done(false) } else { self?.close() }
+            case .waiting:
+                // Transient on cellular (radio wake-up, path flap). Keep waiting; the timer below bounds it.
+                break
             case .cancelled: self?.close()
             default: break
             }
         }
         up.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + 15) { [weak up] in
+            guard !fired, let up else { return }
+            fired = true; up.cancel(); done(false)
+        }
     }
 
     private func pipe() {

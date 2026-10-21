@@ -69,7 +69,8 @@
       "tag": "proxy",
       "server": "172.20.10.1",
       "server_port": 8080,
-      "version": "5"
+      "version": "5",
+      "bind_interface": "en0"
     },
     {
       "type": "direct",
@@ -84,6 +85,10 @@
       {
         "protocol": "dns",
         "action": "hijack-dns"
+      },
+      {
+        "network": "udp",
+        "outbound": "direct"
       },
       {
         "ip_cidr": [

@@ -28,7 +28,7 @@ struct ProxySnapshot: Codable, Equatable {
 }
 
 enum SharedStore {
-    static let appGroup = "group.com.indoyoon.hotspotproxy"
+    static let appGroup = Bundle.main.object(forInfoDictionaryKey: "AppGroupIdentifier") as? String ?? "group.com.example.hotspotproxy"
     static let widgetKind = "HotspotProxyStatus"
     private static let key = "snapshot.v1"
 
