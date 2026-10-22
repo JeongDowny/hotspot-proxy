@@ -94,6 +94,27 @@ connect(host: host, port: port) { [self] ok in
 2. 프록시 주소를 "v4 게이트웨이:8080이 열리면 그것, 아니면 IPv6 기본 라우터"로 고른다.
 3. 고른 주소를 sing-box 설정에 써넣고 재시작한다.
 
+감시 데몬이 한 번 실행될 때의 판단 순서는 아래와 같다.
+
+```mermaid
+flowchart TD
+    L["launchd watch<br/>30초마다 + SystemConfiguration 변경 시"] --> G["IPv4 기본 게이트웨이와<br/>IPv6 기본 라우터 읽기"]
+    G --> H{"게이트웨이가<br/>172.20.10.1 또는 192.0.0.1?"}
+    H -->|"아니요"| O["sing-box 내림<br/>Wi-Fi DNS 비움"]
+    H -->|"예"| P4{"v4 게이트웨이:8080<br/>열림?"}
+    P4 -->|"예"| C{"config.json의 server가<br/>찾은 주소와 같음?"}
+    P4 -->|"아니요"| P6{"v6 라우터 fe80::…%en0:8080<br/>열림?"}
+    P6 -->|"예"| C
+    P6 -->|"아니요"| O
+    C -->|"아니요"| R["server 교체<br/>실행 중인 sing-box 내림"]
+    C -->|"예"| S["sing-box가 없으면 시작"]
+    R --> S
+    S --> D["Wi-Fi DNS = 172.19.0.2"]
+    D --> M{"mode가 바뀜?"}
+    O --> M
+    M -->|"예"| W["watch.log 기록<br/>tailscaled가 있으면 재시작"]
+```
+
 ### mac/hotspot-tun.sh
 
 ```bash
@@ -230,6 +251,26 @@ V6GW=$(netstat -rn -f inet6 | awk '$1=="default"{print $2; exit}')
 for c in "$GW" "$V6GW" $(arp -an -i en0 | awk '{print $2}' | tr -d '()') $(ndp -an | awk '$3 ~ /en0/ {print $1}' | head -6); do
   nc -z -G 2 "$c" 8080 >/dev/null 2>&1 && echo "$c:8080 open" || echo "$c:8080 closed"
 done
+```
+
+등록과 해제는 저장소 루트에서 실행한다. sudo는 필요 없다. heredoc 안의 `$PWD`가 저장소 경로로 바뀌므로 다른 위치에서 실행하지 않는다.
+
+```bash
+# 등록
+cat > ~/Library/LaunchAgents/com.local.hotspot-probe.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.local.hotspot-probe</string>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>$PWD/mac/probe/probe.sh</string></array>
+  <key>StartInterval</key><integer>20</integer><key>RunAtLoad</key><true/>
+  <key>WatchPaths</key><array><string>/Library/Preferences/SystemConfiguration</string></array>
+</dict></plist>
+EOF
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.hotspot-probe.plist
+
+# 해제
+launchctl bootout gui/$(id -u)/com.local.hotspot-probe
 ```
 
 ## 9. 되돌리기

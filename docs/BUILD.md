@@ -40,21 +40,35 @@ Xcode에 **그 팀에 속한 Apple 계정**으로 로그인되어 있어야 한�
 
 ## 빌드·설치
 
+설치는 스크립트 2개, 점검은 스크립트 1개로 끝난다.
+
+1. Xcode › Settings › Accounts에 팀 계정으로 로그인한다.
+2. 아이폰을 USB로 연결하고 아이폰에서 "이 컴퓨터를 신뢰"를 누른다. 아이폰 설정 › 개인정보 보호 및 보안 › 개발자 모드를 켠다.
+3. 도구를 설치한다.
+   ```bash
+   brew install xcodegen sing-box
+   ```
+4. 아이폰 앱을 빌드·설치·실행한다. `signing.env`가 없으면 먼저 `cp signing.env.example signing.env` 후 값을 넣는다(묶음에 있으면 생략).
+   ```bash
+   bash scripts/install-ios.sh             # 아이폰 1대면 자동 선택
+   bash scripts/install-ios.sh "iPhone"    # 여러 대면 기기 이름(일부) 또는 UDID를 인자로
+   bash scripts/install-ios.sh --check     # 도구·서명·기기만 점검, 빌드 안 함
+   ```
+   단계마다 `[OK]`/`[FAIL]`이 찍히고, 실패하면 다음에 할 일을 한 줄로 알려 준다. 빌드 로그는 `build/install-ios.log`.
+   끝나면 아이폰 앱에서 Start Proxy를 누른다. 앱이 안 열리면 아이폰 설정 › 일반 › VPN 및 기기 관리에서 개발자 앱을 신뢰한다.
+5. 맥 쪽 TUN을 설치한다. 비밀번호 입력이 필요하니 실제 터미널에서 실행한다.
+   ```bash
+   sudo bash mac/install.sh
+   ```
+6. 상태를 점검한다.
+   ```bash
+   bash mac/check.sh
+   ```
+
+`install-ios.sh`가 내부에서 돌리는 명령은 예전 수동 절차와 같다. 스크립트 없이 하려면:
+
 ```bash
-brew install xcodegen
-cp signing.env.example signing.env   # 묶음에 signing.env가 있으면 생략
 bash scripts/generate.sh
-open HotspotProxy.xcodeproj
-```
-
-1. Xcode › Settings › Accounts에 팀 계정 로그인.
-2. 아이폰을 USB로 연결, 아이폰에서 "이 컴퓨터를 신뢰". 아이폰 설정 › 개인정보 보호 및 보안 › 개발자 모드 켜기.
-3. 상단 실행 대상을 아이폰으로 고르고 Run(⌘R). 처음에는 기기 등록과 프로파일 발급이 자동으로 돈다.
-4. 앱이 안 열리면 아이폰 설정 › 일반 › VPN 및 기기 관리에서 Enter Next Inc. 신뢰.
-
-터미널로만 하려면:
-
-```bash
 xcrun devicectl list devices                         # UDID(00008130-…)와 UUID 확인
 xcodebuild -project HotspotProxy.xcodeproj -scheme HotspotProxy -configuration Debug \
   -destination 'id=<UDID>' -allowProvisioningUpdates -allowProvisioningDeviceRegistration \
@@ -62,4 +76,4 @@ xcodebuild -project HotspotProxy.xcodeproj -scheme HotspotProxy -configuration D
 xcrun devicectl device install app --device <UUID> build/Build/Products/Debug-iphoneos/HotspotProxy.app
 ```
 
-그다음 맥 쪽 설정은 `docs/share-guide.md` 4장부터.
+맥 스크립트 설명과 사용법은 `docs/share-guide.md` 4장(맥 자동 전환 스크립트)과 5장(사용)을 본다.
