@@ -98,7 +98,9 @@ final class UdpRelay {
             let key = header.base64EncodedString()
             if let c = outs[key] { c.send(content: payload, completion: .idempotent); return }
             guard let p = NWEndpoint.Port(rawValue: port) else { return }
-            let c = NWConnection(host: host, port: p, using: .udp)
+            let up = NWParameters.udp
+            up.requiredInterfaceType = .cellular   // same rule as TCP: never exit through Wi-Fi
+            let c = NWConnection(host: host, port: p, using: up)
             outs[key] = c
             c.stateUpdateHandler = { [weak self] s in
                 if case .failed = s { self?.outs[key]?.cancel(); self?.outs[key] = nil }

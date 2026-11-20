@@ -98,6 +98,13 @@ enum Tcp {
         tcp.keepaliveIdle = 60
         return NWParameters(tls: nil, tcp: tcp)
     }
+    /// Outbound legs leave through cellular only. With the phone on Wi-Fi the default route would
+    /// exit through the Wi-Fi line (e.g. the office IP); without cellular the connect times out instead.
+    static func upstreamParams() -> NWParameters {
+        let p = params()
+        p.requiredInterfaceType = .cellular
+        return p
+    }
     static let chunk = 128 * 1024
 }
 
@@ -288,7 +295,7 @@ final class Session {
     // MARK: upstream + relay
     private func connect(host: String, port: UInt16, _ done: @escaping (Bool) -> Void) {
         guard let p = NWEndpoint.Port(rawValue: port) else { done(false); return }
-        let up = NWConnection(host: NWEndpoint.Host(host), port: p, using: Tcp.params())
+        let up = NWConnection(host: NWEndpoint.Host(host), port: p, using: Tcp.upstreamParams())
         upstream = up
         var fired = false
         up.stateUpdateHandler = { [weak self] s in
@@ -326,18 +333,32 @@ final class Session {
             let payload = (data?.isEmpty == false) ? data : nil
             if let payload { self.onBytes?(payload.count); self.lastActive = DispatchTime.now().uptimeNanoseconds }
             if payload == nil && !done { self.relay(from: from, to: to); return }
-            to.send(content: payload, contentContext: done ? .finalMessage : .defaultMessage, isComplete: done,
-                    completion: .contentProcessed { [weak self] e in
+            // Data and EOF can arrive in one callback (small response + FIN). Send the data as a normal
+            // message first; sending it together with .finalMessage lost it on the client side.
+            if done, let payload {
+                to.send(content: payload, completion: .contentProcessed { [weak self] e in
+                    guard let self, !self.closed else { return }
+                    if e != nil { self.close(); return }
+                    self.finish(to)
+                })
+                return
+            }
+            if done { self.finish(to); return }
+            to.send(content: payload, completion: .contentProcessed { [weak self] e in
                 guard let self, !self.closed else { return }
                 if e != nil { self.close(); return }
-                if done {
-                    self.finished += 1
-                    if self.finished == 2 { self.close() }
-                } else {
-                    self.relay(from: from, to: to)
-                }
+                self.relay(from: from, to: to)
             })
         }
+    }
+
+    /// Forward only a FIN (half-close); the session closes once both directions finished.
+    private func finish(_ to: NWConnection) {
+        to.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { [weak self] _ in
+            guard let self, !self.closed else { return }
+            self.finished += 1
+            if self.finished == 2 { self.close() }
+        })
     }
 
     func close() {
