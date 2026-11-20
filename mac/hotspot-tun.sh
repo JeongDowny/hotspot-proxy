@@ -10,11 +10,14 @@ GW=$(/sbin/route -n get default 2>/dev/null | /usr/bin/awk '/gateway:/{print $2}
 # iOS 26 hotspots on IPv6-only carriers give 192.0.0.x where 192.0.0.1 is a virtual gateway; the phone's proxy only answers
 # on its IPv6 link-local (the v6 default router). Classic hotspots answer on 172.20.10.1.
 V6GW=$(/usr/sbin/netstat -rn -f inet6 2>/dev/null | /usr/bin/awk '$1=="default"{print $2; exit}')   # e.g. fe80::...%en0
+# A suspended iOS app still accepts TCP (kernel backlog) but never answers, so a bare connect test
+# is not enough: require a real SOCKS5 greeting reply (05 00) within 3s.
+socks_ok() { [ -n "$1" ] && [ "$(printf '\x05\x01\x00' | /usr/bin/nc -G 3 -w 3 "$1" 8080 2>/dev/null | /usr/bin/od -An -tx1 | tr -d ' \n' | head -c 4)" = "0500" ]; }
 on_hotspot() { [[ "$GW" =~ ^172\.20\.10\.1$ || "$GW" =~ ^192\.0\.0\.1$ ]]; }
 PROXY_HOST=""
 if on_hotspot; then
-  if /usr/bin/nc -z -G 2 "$GW" 8080 >/dev/null 2>&1; then PROXY_HOST="$GW"
-  elif [ -n "$V6GW" ] && /usr/bin/nc -z -G 2 "$V6GW" 8080 >/dev/null 2>&1; then PROXY_HOST="$V6GW"; fi
+  if socks_ok "$GW"; then PROXY_HOST="$GW"
+  elif [ -n "$V6GW" ] && socks_ok "$V6GW"; then PROXY_HOST="$V6GW"; fi
 fi
 proxy_up() { [ -n "$PROXY_HOST" ]; }
 running() { /bin/launchctl print system/$LABEL >/dev/null 2>&1; }

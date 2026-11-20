@@ -16,6 +16,7 @@ final class ProxyModel: ObservableObject {
 
     private let server = ProxyServer()
     private let keepAlive = KeepAlive()
+    private let locationKeepAlive = LocationKeepAlive()
     private var timer: Timer?
     private var lastPublished: ProxySnapshot?
     /// -uiDemo / -uiDemoNoHotspot: screenshot QA mode, never starts the real server.
@@ -80,6 +81,8 @@ final class ProxyModel: ObservableObject {
         if !demo {
             server.start(port: UInt16(clamping: port))
             keepAlive.start()
+            locationKeepAlive.start()
+            Diag.log("proxy: start port=\(port)")
         }
         running = true
         startedAt = .now
@@ -90,6 +93,8 @@ final class ProxyModel: ObservableObject {
         if !demo {
             server.stop()
             keepAlive.stop()
+            locationKeepAlive.stop()
+            Diag.log("proxy: stop")
         }
         running = false
         startedAt = nil

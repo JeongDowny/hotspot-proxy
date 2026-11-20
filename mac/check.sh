@@ -6,8 +6,10 @@ GW=$(route -n get default 2>/dev/null | awk '/gateway:/{print $2}')
 echo "== 1. 맥이 아이폰 핫스팟에 붙어 있나 (게이트웨이 172.20.10.1 또는 192.0.0.1)"
 if [[ "$GW" =~ ^172\.20\.10\.1$ || "$GW" =~ ^192\.0\.0\.1$ ]]; then ok "핫스팟 게이트웨이 $GW, 맥 IP $(ipconfig getifaddr en0 2>/dev/null)"; else no "핫스팟 아님. 게이트웨이 ${GW:-없음}, 맥 IP $(ipconfig getifaddr en0 2>/dev/null || echo 없음)"; fi
 V6GW=$(netstat -rn -f inet6 2>/dev/null | awk '$1=="default"{print $2; exit}')
+socks_ok() { [ -n "$1" ] && [ "$(printf '\x05\x01\x00' | nc -G 3 -w 3 "$1" 8080 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 4)" = "0500" ]; }
 PROXY_HOST=""
-if [ -n "$GW" ] && nc -z -G 2 "$GW" 8080 >/dev/null 2>&1; then PROXY_HOST="$GW"; elif [ -n "$V6GW" ] && nc -z -G 2 "$V6GW" 8080 >/dev/null 2>&1; then PROXY_HOST="$V6GW"; fi
+if socks_ok "$GW"; then PROXY_HOST="$GW"; elif socks_ok "$V6GW"; then PROXY_HOST="$V6GW"; fi
+if [ -z "$PROXY_HOST" ] && { nc -z -G 2 "$GW" 8080 >/dev/null 2>&1 || { [ -n "$V6GW" ] && nc -z -G 2 "$V6GW" 8080 >/dev/null 2>&1; }; }; then echo "  [WARN] 포트 8080은 열려 있지만 SOCKS 응답이 없음 → 아이폰 앱이 백그라운드에서 정지된 상태"; fi
 echo "== 2. 아이폰 앱 프록시가 응답하나 (v4 게이트웨이 $GW 또는 v6 라우터 ${V6GW:-없음})"
 if [ -n "$PROXY_HOST" ]; then ok "프록시 주소 $PROXY_HOST:8080 열림"; else no "응답 없음. 아이폰 앱에서 Start Proxy 확인"; fi
 echo "== 3. 설치 파일이 다 있나 (sing-box, 감시 스크립트, 설정)"

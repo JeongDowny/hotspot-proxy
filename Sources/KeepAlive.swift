@@ -1,33 +1,86 @@
 import AVFoundation
+import UIKit
 
 /// Loops silent audio so the app (and the proxy) stays alive in the background.
+///
+/// iOS suspends the app the moment the audio session stops being "playing": an interruption,
+/// a media-services reset, or the player simply stopping. A suspended app keeps its listening
+/// socket, so clients can still connect but never get a reply — which looks like a dead proxy.
+/// So: re-assert the session on every lifecycle edge and run a watchdog that restarts playback.
 final class KeepAlive {
     private var player: AVAudioPlayer?
+    private var watchdog: Timer?
+    private var wanted = false
 
     init() {
-        NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
-            guard let self, self.player != nil,
-                  let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-                  AVAudioSession.InterruptionType(rawValue: raw) == .ended else { return }
-            try? AVAudioSession.sharedInstance().setActive(true)
-            self.player?.play()
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
+            let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 99
+            let reason = note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt ?? 99
+            Diag.log("audio: interruption type=\(raw) reason=\(reason)")
+            // Resume after *any* interruption notification; a stale .began is harmless (play() is idempotent).
+            self?.resume()
         }
+        nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
+            Diag.log("audio: route change reason=\(note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 99)")
+            self?.resume()
+        }
+        nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
+            Diag.log("audio: media services reset")
+            self?.player = nil   // the old player is invalid after a reset
+            self?.resume()
+        }
+        nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            Diag.log("app: background")
+            self?.resume()
+        }
+        nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+            Diag.log("app: foreground")
+            self?.resume()
+        }
+        nc.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { _ in Diag.log("app: willTerminate") }
+        nc.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { _ in Diag.log("app: memory warning") }
     }
 
     func start() {
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, options: [.mixWithOthers])
-        try? session.setActive(true)
-        if player == nil { player = try? AVAudioPlayer(data: Self.silentWav()) }
-        player?.numberOfLoops = -1
-        player?.volume = 0
-        player?.play()
+        wanted = true
+        Diag.log("keepalive: start")
+        resume()
+        watchdog?.invalidate()
+        var tick = 0
+        let t = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
+            tick += 1
+            if tick % 6 == 0 { Diag.log("heartbeat playing=\(self?.player?.isPlaying == true) otherAudio=\(AVAudioSession.sharedInstance().isOtherAudioPlaying)") }
+            self?.resume()
+        }
+        t.tolerance = 2
+        RunLoop.main.add(t, forMode: .common)
+        watchdog = t
     }
 
     func stop() {
+        wanted = false
+        Diag.log("keepalive: stop")
+        watchdog?.invalidate(); watchdog = nil
         player?.stop()
         player = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+    }
+
+    /// Idempotent: (re)activates the session and makes sure the silent loop is playing.
+    private func resume() {
+        guard wanted else { return }
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        try? session.setActive(true)
+        if player == nil {
+            player = try? AVAudioPlayer(data: Self.silentWav())
+            player?.numberOfLoops = -1
+        }
+        // The samples are silence, so full volume is inaudible; a zero-volume player is a known
+        // trigger for iOS deciding the app is not really playing audio.
+        player?.volume = 1
+        if player?.isPlaying != true { let ok = player?.play() ?? false; Diag.log("audio: (re)start play -> \(ok)") }
     }
 
     /// Long (30s), low-rate (8kHz 8-bit) silence minimizes wakeups at loop boundaries.

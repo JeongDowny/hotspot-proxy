@@ -13,9 +13,12 @@ final class ProxyServer {
     private lazy var udp = UdpRelay(queue: queue)
     /// Each session gets a serial queue targeting this concurrent queue, so connections run in parallel across cores.
     private let work = DispatchQueue(label: "proxy.sessions", qos: .userInitiated, attributes: .concurrent)
+    private var reaper: DispatchSourceTimer?
+    private var ticks = 0
 
     func start(port: UInt16) {
         stop()
+        Limits.raiseFileLimit()
         do {
             let params = Tcp.params()
             params.allowLocalEndpointReuse = true
@@ -33,6 +36,7 @@ final class ProxyServer {
             queue.async { [self] in
                 udp.onBytes = { [weak self] n in self?.bytes.withLock { $0 &+= UInt64(n) } }
                 udp.start(port: port)
+                startReaper()
             }
         } catch {
             onState?("Failed to start: \(error)")
@@ -42,6 +46,7 @@ final class ProxyServer {
     func stop() {
         listener?.cancel(); listener = nil
         queue.async { [weak self] in
+            self?.reaper?.cancel(); self?.reaper = nil
             self?.udp.stop()
             self?.live.values.forEach { s in s.queue.async { s.close() } }
             self?.live.removeAll()
@@ -56,6 +61,24 @@ final class ProxyServer {
         s.onBytes = { [weak self] n in self?.bytes.withLock { $0 &+= UInt64(n) } }
         s.onClose = { [weak self] in self?.queue.async { self?.live[id] = nil } }
         s.queue.async { s.start() }
+    }
+
+    /// Closes sessions that will never finish on their own: a client that never sends its request,
+    /// a half-closed pair whose other side never sends FIN, and pairs with no traffic for minutes.
+    /// Without this, idle sessions pile up until the app hits its file limit; then iOS stops accepting
+    /// on the listener (clients see a connect timeout) and upstream dials fail (SOCKS reply 5).
+    private func startReaper() {
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + 10, repeating: 10, leeway: .seconds(2))
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            let now = DispatchTime.now().uptimeNanoseconds
+            for s in self.live.values { s.queue.async { s.reapIfStale(now: now) } }
+            self.ticks += 1
+            if self.ticks % 6 == 0 { Diag.log("proxy: live=\(self.live.count) fds=\(Limits.openFiles())") }
+        }
+        t.resume()
+        reaper = t
     }
 
     /// Called only while the UI is visible (never wakes the main thread in background).
@@ -84,6 +107,9 @@ final class Session {
     let queue: DispatchQueue
     var buf = Data()
     var closed = false
+    private var piping = false
+    private var holdsUdp = false
+    private var lastActive = DispatchTime.now().uptimeNanoseconds
     private var finished = 0   // directions that hit EOF; session closes at 2
     var onBytes: ((Int) -> Void)?
     var onClose: (() -> Void)?
@@ -100,6 +126,16 @@ final class Session {
             guard let self else { return }
             if self.buf.first == 0x05 { self.socksGreeting() } else { self.readHttpHeader() }
         }
+    }
+
+    /// Limits in seconds: request handshake, one direction already closed, no traffic at all.
+    static let handshakeLimit: UInt64 = 20, halfOpenLimit: UInt64 = 60, idleLimit: UInt64 = 600
+
+    func reapIfStale(now: UInt64) {
+        guard !closed, !holdsUdp else { return }
+        let idle = (now &- lastActive) / 1_000_000_000
+        let limit = !piping ? Self.handshakeLimit : finished > 0 ? Self.halfOpenLimit : Self.idleLimit
+        if idle > limit { close() }
     }
 
     // MARK: buffered reading
@@ -170,6 +206,7 @@ final class Session {
             resp = Data([5, 0, 0, 1]) + v4.rawValue + Data([UInt8(p.rawValue >> 8), UInt8(p.rawValue & 0xff)])
         }
         client.send(content: resp, completion: .contentProcessed { _ in })
+        holdsUdp = true   // lives as long as the client keeps the control connection
         holdOpen()
     }
 
@@ -275,6 +312,7 @@ final class Session {
 
     private func pipe() {
         guard let up = upstream else { close(); return }
+        piping = true; lastActive = DispatchTime.now().uptimeNanoseconds
         if !buf.isEmpty { let d = buf; buf = Data(); up.send(content: d, completion: .contentProcessed { _ in }) }
         relay(from: client, to: up)
         relay(from: up, to: client)
@@ -286,7 +324,7 @@ final class Session {
             guard let self, !self.closed else { return }
             if err != nil { self.close(); return }
             let payload = (data?.isEmpty == false) ? data : nil
-            if let payload { self.onBytes?(payload.count) }
+            if let payload { self.onBytes?(payload.count); self.lastActive = DispatchTime.now().uptimeNanoseconds }
             if payload == nil && !done { self.relay(from: from, to: to); return }
             to.send(content: payload, contentContext: done ? .finalMessage : .defaultMessage, isComplete: done,
                     completion: .contentProcessed { [weak self] e in
@@ -307,5 +345,25 @@ final class Session {
         closed = true
         client.cancel(); upstream?.cancel()
         onClose?()
+    }
+}
+
+enum Limits {
+    /// iOS starts apps with a soft limit of 256 descriptors. Every proxied TCP pair holds 2,
+    /// so ~120 concurrent Mac connections (browser + Claude + KakaoTalk) exhaust it.
+    static func raiseFileLimit() {
+        var r = rlimit()
+        guard getrlimit(RLIMIT_NOFILE, &r) == 0 else { return }
+        let before = r.rlim_cur
+        r.rlim_cur = min(r.rlim_max, rlim_t(OPEN_MAX))
+        let ok = setrlimit(RLIMIT_NOFILE, &r) == 0
+        var after = rlimit(); getrlimit(RLIMIT_NOFILE, &after)
+        Diag.log("limits: nofile \(before) -> \(after.rlim_cur) (max \(r.rlim_max), ok=\(ok))")
+    }
+
+    static func openFiles() -> Int {
+        var r = rlimit(); getrlimit(RLIMIT_NOFILE, &r)
+        let top = Int32(min(r.rlim_cur, 16384))
+        return (0..<top).reduce(0) { $0 + (fcntl($1, F_GETFD) != -1 ? 1 : 0) }
     }
 }

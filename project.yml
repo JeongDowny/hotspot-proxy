@@ -42,7 +42,9 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen:
           UIColorName: LaunchBackground
-        UIBackgroundModes: [audio]
+        UIBackgroundModes: [audio, location]
+        NSLocationWhenInUseUsageDescription: Coarse location updates keep the proxy running in the background. Your location is not stored or sent anywhere.
+        NSLocationAlwaysAndWhenInUseUsageDescription: Coarse location updates keep the proxy running in the background. Your location is not stored or sent anywhere.
         NSLocalNetworkUsageDescription: Needed to accept proxy connections from devices on your Personal Hotspot.
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         ITSAppUsesNonExemptEncryption: false
