@@ -18,6 +18,7 @@ final class LocationKeepAlive: NSObject, CLLocationManagerDelegate {
 
     func start() {
         wanted = true
+        StatusProbe.shared.setLocation(mgr.authorizationStatus)
         switch mgr.authorizationStatus {
         case .notDetermined: mgr.requestAlwaysAuthorization()
         default: begin()
@@ -31,6 +32,7 @@ final class LocationKeepAlive: NSObject, CLLocationManagerDelegate {
     }
 
     private func begin() {
+        StatusProbe.shared.setLocation(mgr.authorizationStatus)
         guard wanted else { return }
         let st = mgr.authorizationStatus
         guard st == .authorizedAlways || st == .authorizedWhenInUse else { Diag.log("location: not authorized (\(st.rawValue))"); return }

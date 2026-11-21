@@ -64,6 +64,7 @@ final class KeepAlive {
         watchdog?.invalidate(); watchdog = nil
         player?.stop()
         player = nil
+        StatusProbe.shared.setAudioPlaying(false)
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     }
 
@@ -81,6 +82,7 @@ final class KeepAlive {
         // trigger for iOS deciding the app is not really playing audio.
         player?.volume = 1
         if player?.isPlaying != true { let ok = player?.play() ?? false; Diag.log("audio: (re)start play -> \(ok)") }
+        StatusProbe.shared.setAudioPlaying(player?.isPlaying == true)
     }
 
     /// Long (30s), low-rate (8kHz 8-bit) silence minimizes wakeups at loop boundaries.

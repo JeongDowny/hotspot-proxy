@@ -10,6 +10,8 @@ final class ProxyServer {
     var onStats: ((Int, UInt64) -> Void)?
     var onState: ((String?) -> Void)?
     private let bytes = OSAllocatedUnfairLock(initialState: UInt64(0))
+    private let sessionsTotal = OSAllocatedUnfairLock(initialState: UInt64(0))
+    private let dialFailTotal = OSAllocatedUnfairLock(initialState: UInt64(0))
     private lazy var udp = UdpRelay(queue: queue)
     /// Each session gets a serial queue targeting this concurrent queue, so connections run in parallel across cores.
     private let work = DispatchQueue(label: "proxy.sessions", qos: .userInitiated, attributes: .concurrent)
@@ -19,6 +21,9 @@ final class ProxyServer {
     func start(port: UInt16) {
         stop()
         Limits.raiseFileLimit()
+        sessionsTotal.withLock { $0 = 0 }
+        dialFailTotal.withLock { $0 = 0 }
+        StatusProbe.shared.serverStarted()
         do {
             let params = Tcp.params()
             params.allowLocalEndpointReuse = true
@@ -45,6 +50,7 @@ final class ProxyServer {
 
     func stop() {
         listener?.cancel(); listener = nil
+        StatusProbe.shared.serverStopped()
         queue.async { [weak self] in
             self?.reaper?.cancel(); self?.reaper = nil
             self?.udp.stop()
@@ -58,7 +64,19 @@ final class ProxyServer {
         let s = Session(client: c, queue: DispatchQueue(label: "proxy.s", target: work))
         let id = ObjectIdentifier(s)
         live[id] = s
+        sessionsTotal.withLock { $0 &+= 1 }
         s.onBytes = { [weak self] n in self?.bytes.withLock { $0 &+= UInt64(n) } }
+        s.onDialFail = { [weak self] in self?.dialFailTotal.withLock { $0 &+= 1 } }
+        s.statusProvider = { [weak self] reply in
+            guard let self else { return }
+            self.queue.async {
+                reply(StatusProbe.shared.httpResponse(
+                    live: self.live.count,
+                    bytes: self.bytes.withLock { $0 },
+                    sessions: self.sessionsTotal.withLock { $0 },
+                    dialFail: self.dialFailTotal.withLock { $0 }))
+            }
+        }
         s.onClose = { [weak self] in self?.queue.async { self?.live[id] = nil } }
         s.queue.async { s.start() }
     }
@@ -120,6 +138,9 @@ final class Session {
     private var finished = 0   // directions that hit EOF; session closes at 2
     var onBytes: ((Int) -> Void)?
     var onClose: (() -> Void)?
+    var onDialFail: (() -> Void)?
+    /// Answers `GET /_status`; hands the finished HTTP response to the callback.
+    var statusProvider: ((@escaping (Data) -> Void) -> Void)?
 
     init(client: NWConnection, queue: DispatchQueue) { self.client = client; self.queue = queue }
 
@@ -258,6 +279,17 @@ final class Session {
             return
         }
 
+        // Origin-form request for the app's own status page; everything else keeps the proxy path.
+        if method.uppercased() == "GET", target == "/_status", let provider = statusProvider {
+            provider { [weak self] data in
+                self?.queue.async {
+                    guard let self, !self.closed else { return }
+                    self.client.send(content: data, completion: .contentProcessed { [weak self] _ in self?.close() })
+                }
+            }
+            return
+        }
+
         guard let url = URL(string: target), let host = url.host else {
             client.send(content: Data("HTTP/1.1 400 Bad Request\r\nX-Proxy: hotspot\r\nContent-Length: 0\r\n\r\n".utf8), completion: .contentProcessed { [weak self] _ in self?.close() })
             return
@@ -302,7 +334,7 @@ final class Session {
             switch s {
             case .ready: if !fired { fired = true; done(true) }
             case .failed:
-                if !fired { fired = true; done(false) } else { self?.close() }
+                if !fired { fired = true; self?.onDialFail?(); done(false) } else { self?.close() }
             case .waiting:
                 // Transient on cellular (radio wake-up, path flap). Keep waiting; the timer below bounds it.
                 break
@@ -311,9 +343,9 @@ final class Session {
             }
         }
         up.start(queue: queue)
-        queue.asyncAfter(deadline: .now() + 15) { [weak up] in
+        queue.asyncAfter(deadline: .now() + 15) { [weak self, weak up] in
             guard !fired, let up else { return }
-            fired = true; up.cancel(); done(false)
+            fired = true; self?.onDialFail?(); up.cancel(); done(false)
         }
     }
 

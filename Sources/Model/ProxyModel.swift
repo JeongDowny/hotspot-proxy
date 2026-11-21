@@ -42,6 +42,7 @@ final class ProxyModel: ObservableObject {
             startedAt = .now.addingTimeInterval(-3725)
             addresses = [("bridge100", "172.20.10.1"), ("en0", "192.168.0.12"), ("pdp_ip0", "10.44.1.7")]
         } else {
+            StatusProbe.shared.begin()
             refreshAddresses()
             if autoStart { start() }
         }
